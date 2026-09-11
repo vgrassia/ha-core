@@ -3,7 +3,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import cast, override
+from typing import Any, cast, override
 
 from pyprusalink.types import (
     JobFilePrint,
@@ -46,6 +46,7 @@ class PrusaLinkSensorEntityDescription[
     """Describes PrusaLink sensor entity."""
 
     value_fn: Callable[[T], datetime | StateType]
+    variance: timedelta | None = None
 
 
 # Both job timestamps are derived from the wall clock, so they only hold while
@@ -196,10 +197,8 @@ SENSORS: dict[str, tuple[PrusaLinkSensorEntityDescription, ...]] = {
             key="job.start",
             translation_key="print_start",
             device_class=SensorDeviceClass.TIMESTAMP,
-            value_fn=ignore_variance(
-                lambda data: utcnow() - timedelta(seconds=data["time_printing"]),
-                timedelta(minutes=2),
-            ),
+            value_fn=lambda data: utcnow() - timedelta(seconds=data["time_printing"]),
+            variance=timedelta(minutes=2),
             available_fn=lambda data: (
                 data.get("time_printing") is not None
                 and data.get("state") in JOB_IN_PROGRESS_STATES
@@ -211,12 +210,10 @@ SENSORS: dict[str, tuple[PrusaLinkSensorEntityDescription, ...]] = {
             device_class=SensorDeviceClass.TIMESTAMP,
             # `available_fn` guarantees `time_remaining` is not None at this
             # point; the cast narrows the Optional for `timedelta`.
-            value_fn=ignore_variance(
-                lambda data: (
-                    utcnow() + timedelta(seconds=cast(int, data["time_remaining"]))
-                ),
-                timedelta(minutes=2),
+            value_fn=lambda data: (
+                utcnow() + timedelta(seconds=cast(int, data["time_remaining"]))
             ),
+            variance=timedelta(minutes=2),
             available_fn=lambda data: (
                 data.get("time_remaining") is not None
                 and data.get("state") in JOB_IN_PROGRESS_STATES
@@ -280,9 +277,15 @@ class PrusaLinkSensorEntity(PrusaLinkEntity, SensorEntity):
         super().__init__(coordinator=coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{description.key}"
+        self._value_fn: Callable[[Any], datetime | StateType] = description.value_fn
+        if description.variance is not None:
+            self._value_fn = ignore_variance(
+                cast(Callable[[Any], datetime], description.value_fn),
+                description.variance,
+            )
 
     @property
     @override
     def native_value(self) -> datetime | StateType:
         """Return the state of the sensor."""
-        return self.entity_description.value_fn(self.coordinator.data)
+        return self._value_fn(self.coordinator.data)

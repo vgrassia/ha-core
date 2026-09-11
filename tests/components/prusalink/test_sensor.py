@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import patch
 
+from pyprusalink import PrusaLink
 import pytest
 
 from homeassistant.components.prusalink import DOMAIN
@@ -24,9 +25,18 @@ from homeassistant.const import (
     UnitOfTemperature,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.setup import async_setup_component
 
 from tests.common import MockConfigEntry
+
+JOB_PRINTING: dict[str, Any] = {
+    "id": 129,
+    "state": "PRINTING",
+    "progress": 37.00,
+    "time_remaining": 73020,
+    "time_printing": 43987,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -425,3 +435,61 @@ async def test_job_timestamps_kept_while_paused(
     state = hass.states.get("sensor.workshop_mock_title_print_finish")
     assert state is not None
     assert state.state == "2022-08-28T10:17:00+00:00"
+
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_job_timestamp_variance_is_per_config_entry(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    mock_version_api: dict[str, str],
+    mock_info_api: dict[str, Any],
+    mock_get_legacy_printer: dict[str, Any],
+    mock_get_status_printing: dict[str, Any],
+) -> None:
+    """Two printers each keep their own drift-suppression state."""
+    jobs = {
+        "http://printer-a": dict(JOB_PRINTING, time_printing=43987),
+        "http://printer-b": dict(JOB_PRINTING, time_printing=43920),
+    }
+    entries = [
+        MockConfigEntry(
+            domain=DOMAIN,
+            title=title,
+            data={"host": host, "username": "dummy", "password": "dummypw"},
+            version=1,
+            minor_version=2,
+        )
+        for title, host in (
+            ("Printer A", "http://printer-a"),
+            ("Printer B", "http://printer-b"),
+        )
+    ]
+    for entry in entries:
+        entry.add_to_hass(hass)
+
+    async def get_job(self: PrusaLink) -> dict[str, Any]:
+        return jobs[self.client.host]
+
+    with (
+        patch("pyprusalink.PrusaLink.get_job", autospec=True, side_effect=get_job),
+        patch(
+            "homeassistant.components.prusalink.sensor.utcnow",
+            return_value=datetime(2022, 8, 27, 14, 0, 0, tzinfo=UTC),
+        ),
+    ):
+        assert await async_setup_component(hass, DOMAIN, {})
+        await hass.async_block_till_done()
+
+    states = [
+        hass.states.get(
+            entity_registry.async_get_entity_id(
+                Platform.SENSOR, DOMAIN, f"{entry.entry_id}_job.start"
+            )
+        )
+        for entry in entries
+    ]
+    assert states[0] is not None
+    assert states[1] is not None
+    # 67 seconds apart, well inside the two-minute variance window.
+    assert states[0].state == "2022-08-27T01:46:53+00:00"
+    assert states[1].state == "2022-08-27T01:48:00+00:00"
