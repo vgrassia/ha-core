@@ -277,7 +277,7 @@ class PrusaLinkSensorEntity(PrusaLinkEntity, SensorEntity):
         super().__init__(coordinator=coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{description.key}"
-        self._value_fn: Callable[[Any], datetime | StateType] = description.value_fn
+        self._value_fn = description.value_fn
         if description.variance is not None:
             self._value_fn = ignore_variance(
                 cast(Callable[[Any], datetime], description.value_fn),
